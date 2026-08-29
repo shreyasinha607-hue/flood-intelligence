@@ -1,7 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database.connection import Base, engine, get_db
+from app.models.village import Village
+from app.schemas.village import VillageCreate, VillageResponse
 from sqlalchemy import text
 
-from app.database.connection import engine
 
 
 app = FastAPI(
@@ -9,6 +13,8 @@ app = FastAPI(
     description="AI-assisted flood prediction, risk assessment and relief allocation system for Assam.",
     version="0.1.0",
 )
+
+Base.metadata.create_all(bind=engine)
 
 
 @app.get("/")
@@ -36,3 +42,45 @@ def database_test():
         "database": "connected",
         "test_result": value
     }
+
+@app.post("/villages", response_model=VillageResponse)
+def create_village(
+    village: VillageCreate,
+    db: Session = Depends(get_db)
+):
+    new_village = Village(
+        name=village.name,
+        district=village.district,
+        latitude=village.latitude,
+        longitude=village.longitude,
+        population=village.population,
+        is_char=village.is_char,
+        accessibility_score=village.accessibility_score,
+    )
+
+    db.add(new_village)
+    db.commit()
+    db.refresh(new_village)
+
+    return new_village
+
+@app.get("/villages", response_model=list[VillageResponse])
+def get_villages(db: Session = Depends(get_db)):
+    return db.query(Village).all()
+
+@app.get("/villages/{village_id}", response_model=VillageResponse)
+def get_village(
+    village_id: int,
+    db: Session = Depends(get_db)
+):
+    village = db.query(Village).filter(
+        Village.id == village_id
+    ).first()
+
+    if not village:
+        raise HTTPException(
+            status_code=404,
+            detail="Village not found"
+        )
+
+    return village
