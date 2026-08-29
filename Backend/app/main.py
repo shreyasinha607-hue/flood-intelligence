@@ -11,6 +11,7 @@ from app.models.river_gauge import RiverGauge
 from app.models.river_reading import RiverReading
 from app.models.rainfall import Rainfall
 from app.schemas.rainfall import RainfallCreate, RainfallResponse
+from app.models.ifewras_models import Catchment, TriggerEvent, ReliefResource, DispatchPlan, AlertLog
 
 
 
@@ -549,3 +550,150 @@ def get_prediction(
 
     "model_type": "baseline_linear_forecast"
 }
+# ==========================================
+# NEW PRD ENDPOINTS (Stage 1 & Stage 3 Additions)
+# ==========================================
+
+@app.post("/catchments/trigger-check/{catchment_id}")
+def evaluate_upstream_trigger(
+    catchment_id: int, 
+    gpm_rainfall_mm: float, 
+    soil_moisture_index: float, 
+    db: Session = Depends(get_db)
+):
+    catchment = db.query(Catchment).filter(Catchment.id == catchment_id).first()
+    if not catchment:
+        raise HTTPException(status_code=404, detail="Catchment not found")
+
+    effective_rainfall = gpm_rainfall_mm * (1.0 + soil_moisture_index)
+    is_triggered = effective_rainfall >= catchment.critical_rainfall_threshold_mm
+
+    if is_triggered:
+        confidence = min(1.0, effective_rainfall / (catchment.critical_rainfall_threshold_mm * 1.5))
+        time_to_plains = max(2.0, 6.0 - (gpm_rainfall_mm / 20.0))
+
+        trigger = TriggerEvent(
+            catchment_id=catchment.id,
+            gpm_rainfall_mm=gpm_rainfall_mm,
+            soil_moisture_index=soil_moisture_index,
+            estimated_time_to_plains_hr=round(time_to_plains, 1),
+            confidence_score=round(confidence, 2)
+        )
+        db.add(trigger)
+        db.commit()
+        db.refresh(trigger)
+
+        return {
+            "status": "TRIGGERED",
+            "message": f"Flash flood risk detected in {catchment.name}",
+            "trigger_details": trigger
+        }
+
+    return {
+        "status": "NORMAL",
+        "message": "Rainfall within safe limits",
+        "effective_rainfall_mm": round(effective_rainfall, 2)
+    }
+
+
+def generate_multilingual_alert(village_name: str, risk_level: str, language: str) -> str:
+    if language == "Bodo":
+        return f"सावधान! {village_name} गामिआव दैबानाव {risk_level} खैफोद दं। सांग्रां था।"
+    elif language == "Assamese":
+        return f"সতৰ্কতা! {village_name} গাঁৱত বানপানীৰ {risk_level} বিপদাশংকা আছে। সুৰক্ষিত স্থানলৈ যাওঁক।"
+    return f"ALERT! {village_name} is under {risk_level} flood risk. Move to higher ground."
+
+
+@app.post("/relief/run-allocation/{district}")
+def run_district_relief_allocation(district: str, db: Session = Depends(get_db)):
+    villages = db.query(Village).filter(Village.district == district).all()
+    resource = db.query(ReliefResource).filter(ReliefResource.district == district).first()
+
+    if not villages:
+        raise HTTPException(status_code=404, detail="No villages found in this district")
+
+    evaluated_villages = []
+
+    for v in villages:
+        latest_rainfall = db.query(Rainfall).filter(
+            Rainfall.district == district
+        ).order_by(Rainfall.timestamp.desc()).first()
+        
+        rainfall_mm = latest_rainfall.rainfall_mm if latest_rainfall else 0.0
+
+        access_difficulty = 10 - v.accessibility_score
+        char_factor = 20 if v.is_char else 0
+        risk_score = round(min(100.0, (rainfall_mm * 0.5) + (v.population / 200) + (access_difficulty * 3) + char_factor), 2)
+
+        if v.is_char or risk_score > 70:
+            access_profile = "BOAT_ONLY"
+        elif risk_score > 90:
+            access_profile = "HELICOPTER_ONLY"
+        else:
+            access_profile = "ROAD_CONNECTED"
+
+        if access_profile in ["BOAT_ONLY", "HELICOPTER_ONLY"]:
+            kit_type = "Medical + Boat-Deployable Emergency Kits"
+        else:
+            kit_type = "Dry Ration & Clean Water Kits"
+
+        evaluated_villages.append({
+            "village_id": v.id,
+            "village_name": v.name,
+            "risk_score": risk_score,
+            "access_profile": access_profile,
+            "kit_type": kit_type,
+            "language": getattr(v, "primary_language", "Assamese")
+        })
+
+    evaluated_villages.sort(key=lambda x: x["risk_score"], reverse=True)
+
+    dispatch_results = []
+    avail_boats = resource.boats_available if resource else 2
+    avail_medical = resource.medical_teams_available if resource else 2
+
+    for rank, item in enumerate(evaluated_villages, start=1):
+        assigned_boats = 1 if item["access_profile"] == "BOAT_ONLY" and avail_boats > 0 else 0
+        assigned_med = 1 if item["risk_score"] > 60 and avail_medical > 0 else 0
+
+        avail_boats -= assigned_boats
+        avail_medical -= assigned_med
+
+        dispatch = DispatchPlan(
+            village_id=item["village_id"],
+            risk_score=item["risk_score"],
+            rank_priority=rank,
+            access_profile=item["access_profile"],
+            recommended_kit_type=item["kit_type"],
+            allocated_boats=assigned_boats,
+            allocated_medical_teams=assigned_med,
+            status="PENDING"
+        )
+        db.add(dispatch)
+
+        if item["risk_score"] >= 50.0:
+            msg = generate_multilingual_alert(item["village_name"], "HIGH", item["language"])
+            alert = AlertLog(
+                village_id=item["village_id"],
+                language=item["language"],
+                channel="SMS/WhatsApp",
+                message_body=msg
+            )
+            db.add(alert)
+
+        dispatch_results.append({
+            "rank": rank,
+            "village_name": item["village_name"],
+            "risk_score": item["risk_score"],
+            "access_profile": item["access_profile"],
+            "allocated_boats": assigned_boats,
+            "allocated_medical_teams": assigned_med
+        })
+
+    db.commit()
+
+    return {
+        "district": district,
+        "processed_count": len(dispatch_results),
+        "dispatch_plan": dispatch_results
+    }
