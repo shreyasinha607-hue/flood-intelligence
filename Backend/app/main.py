@@ -240,6 +240,15 @@ def get_river_trend(
     ).order_by(
         RiverReading.timestamp.desc()
     ).limit(2).all()
+    # Get the latest rainfall record
+    latest_rainfall = db.query(Rainfall).order_by(
+        Rainfall.timestamp.desc()
+    ).first()
+
+    rainfall_mm = 0
+
+    if latest_rainfall:
+        rainfall_mm = latest_rainfall.rainfall_mm
 
     if len(readings) < 2:
         raise HTTPException(
@@ -436,18 +445,28 @@ def get_prediction(
         )
 
     # Get the latest two readings
+    # Get the latest two readings
     readings = db.query(RiverReading).filter(
         RiverReading.gauge_id == gauge_id
     ).order_by(
-        RiverReading.timestamp.desc()
+    RiverReading.timestamp.desc()
     ).limit(2).all()
+
+# Get the latest rainfall record
+    latest_rainfall = db.query(Rainfall).order_by(
+    Rainfall.timestamp.desc()
+    ).first()
+
+    rainfall_mm = 0
+
+    if latest_rainfall:
+        rainfall_mm = latest_rainfall.rainfall_mm
 
     if len(readings) < 2:
         raise HTTPException(
             status_code=404,
             detail="Not enough river readings for prediction"
         )
-
     latest = readings[0]
     previous = readings[1]
 
@@ -493,39 +512,40 @@ def get_prediction(
         prediction_status = "DANGER NOT EXPECTED"
 
     return {
-        "gauge_id": gauge.id,
-        "gauge_name": gauge.name,
-        "river": gauge.river,
-        "district": gauge.district,
+    "gauge_id": gauge.id,
+    "gauge_name": gauge.name,
+    "river": gauge.river,
+    "district": gauge.district,
 
-        "current_water_level": latest.water_level,
+    "current_water_level": latest.water_level,
+    "previous_water_level": previous.water_level,
 
-        "previous_water_level": previous.water_level,
+    "latest_rainfall_mm": rainfall_mm,
 
-        "rise_rate_m_per_hour": round(
-            rise_rate,
-            4
-        ),
+    "rise_rate_m_per_hour": round(
+        rise_rate,
+        4
+    ),
 
-        "prediction_24h": round(
-            prediction_24h,
-            2
-        ),
+    "prediction_24h": round(
+        prediction_24h,
+        2
+    ),
 
-        "prediction_48h": round(
-            prediction_48h,
-            2
-        ),
+    "prediction_48h": round(
+        prediction_48h,
+        2
+    ),
 
-        "prediction_72h": round(
-            prediction_72h,
-            2
-        ),
+    "prediction_72h": round(
+        prediction_72h,
+        2
+    ),
 
-        "warning_level": latest.warning_level,
-        "danger_level": danger_level,
+    "warning_level": latest.warning_level,
+    "danger_level": danger_level,
 
-        "prediction_status": prediction_status,
+    "prediction_status": prediction_status,
 
-        "model_type": "baseline_linear_forecast"
-    }
+    "model_type": "baseline_linear_forecast"
+}
